@@ -47,6 +47,14 @@ spark       = glueContext.spark_session
 # --nltk_location                   : s3://my-bucket/nltk_data/
 # --prev_date                       : 2026-04-01       (optional; pass literal
 #                                       string "null" or omit to run full flow)
+# --run_date                        : 2026-07-07        (optional; overrides
+#                                       today's date for the output path —
+#                                       {output_file_path}/{tenant}/{run_date}.
+#                                       Omit to use date.today() as before.
+#                                       Lets a caller like a Step Functions
+#                                       state machine pin the same date this
+#                                       job used, so a downstream job can
+#                                       reliably locate its output.)
 #
 # Glue system parameters:
 # --extra-files                     : s3://ml-etl-test-dataset/cce_automated_dataset/models/model.tar.gz
@@ -84,6 +92,23 @@ OUTPUT_FILE_PATH = args["output_file_path"].rstrip("/")
 NLTK_LOCATION    = args["nltk_location"].rstrip("/")
 _prev_date_raw   = args.get("prev_date", "-").strip()
 PREV_DATE        = None if _prev_date_raw.lower() == "-" else _prev_date_raw
+
+# --run_date is intentionally NOT in the getResolvedOptions list above --
+# it's an optional override for callers (e.g. a Step Functions state machine)
+# that need this job and a downstream job to agree on the same date rather
+# than each independently resolving date.today(). Existing callers that never
+# pass --run_date are unaffected; the job falls back to today's date exactly
+# as before.
+def _get_optional_arg(argv: list, name: str) -> str | None:
+    flag = f"--{name}"
+    if flag in argv:
+        idx = argv.index(flag)
+        if idx + 1 < len(argv):
+            return argv[idx + 1]
+    return None
+
+_run_date_raw  = _get_optional_arg(sys.argv, "run_date")
+RUN_DATE_OVERRIDE = None if _run_date_raw is None or _run_date_raw.strip().lower() == "-" else _run_date_raw.strip()
 
 # Score weightings
 BERT_WEIGHT  = 0.7
@@ -824,7 +849,7 @@ def run_incremental(
 def main():
     from datetime import date
 
-    run_date = str(date.today())
+    run_date = RUN_DATE_OVERRIDE or str(date.today())
 
     print("=" * 60)
     print(f"  tenant           : {TENANT}")

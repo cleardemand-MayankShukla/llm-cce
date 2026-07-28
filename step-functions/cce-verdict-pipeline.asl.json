@@ -1,0 +1,110 @@
+{
+  "Comment": "Runs either the CCE dataset-materialise job or the verdict pipeline, selected via the `branch` input field ('cce' or 'verdict'). Within the verdict branch, `skip_category_mapping` (boolean) decides whether to rebuild the category mapping first or go straight to the retriever using an already-existing mapping folder -- established tenants with plenty of their own match history (e.g. chewy) don't need category-mapping regenerated on every run; sparse/new tenants (e.g. ctc) do. Both paths converge through a Pass state so BuildRetriever only needs to exist once.",
+  "StartAt": "SelectBranch",
+  "States": {
+    "SelectBranch": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.branch",
+          "StringEquals": "cce",
+          "Next": "MaterialiseDataset"
+        },
+        {
+          "Variable": "$.branch",
+          "StringEquals": "verdict",
+          "Next": "SelectVerdictPath"
+        }
+      ]
+    },
+
+    "MaterialiseDataset": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Comment": "CCE branch: builds the labelled SKU-pair training set for the tenant.",
+      "Parameters": {
+        "JobName": "cce_0_dataset_materialise",
+        "Arguments": {
+          "--tenant.$": "$.tenant",
+          "--load_date.$": "$.load_date",
+          "--dynamodb_table.$": "$.cce.dynamodb_table",
+          "--dynamodb_config_key.$": "$.cce.dynamodb_config_key"
+        }
+      },
+      "ResultPath": "$.results.cce",
+      "End": true
+    },
+
+    "SelectVerdictPath": {
+      "Type": "Choice",
+      "Comment": "skip_category_mapping=true -> reuse an existing mapping folder (or none at all) via retriever.category_map_file_path. Default (false/absent) -> rebuild the mapping first.",
+      "Choices": [
+        {
+          "Variable": "$.skip_category_mapping",
+          "BooleanEquals": true,
+          "Next": "UseExistingCategoryMapping"
+        }
+      ],
+      "Default": "BuildCategoryMapping"
+    },
+
+    "BuildCategoryMapping": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Comment": "Verdict branch, step 1: taxonomy-to-taxonomy similarity mapping for this tenant against its competitor list.",
+      "Parameters": {
+        "JobName": "verdict-engine-category-mapping",
+        "Arguments": {
+          "--tenant.$": "$.tenant",
+          "--competitor_list.$": "$.category_mapping.competitor_list",
+          "--threshold.$": "$.category_mapping.threshold",
+          "--output_file_path.$": "$.category_mapping.output_file_path",
+          "--nltk_location.$": "$.category_mapping.nltk_location",
+          "--prev_date.$": "$.category_mapping.prev_date",
+          "--run_date.$": "$.run_date"
+        }
+      },
+      "ResultPath": "$.results.category_mapping",
+      "Next": "UseFreshCategoryMapping"
+    },
+
+    "UseFreshCategoryMapping": {
+      "Type": "Pass",
+      "Comment": "Points at the folder BuildCategoryMapping just wrote, scoped by the same run_date.",
+      "Parameters": {
+        "category_map_file_path.$": "States.Format('{}/{}/{}/', $.category_mapping.output_file_path, $.tenant, $.run_date)"
+      },
+      "ResultPath": "$.resolved",
+      "Next": "BuildRetriever"
+    },
+
+    "UseExistingCategoryMapping": {
+      "Type": "Pass",
+      "Comment": "Skips rebuilding the mapping. retriever.category_map_file_path is either '-' (no synthetic data at all -- e.g. chewy) or a specific already-built mapping folder to reuse.",
+      "Parameters": {
+        "category_map_file_path.$": "$.retriever.category_map_file_path"
+      },
+      "ResultPath": "$.resolved",
+      "Next": "BuildRetriever"
+    },
+
+    "BuildRetriever": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Comment": "Verdict branch, step 2: builds the TF-IDF+KNN retriever bundle, using either a freshly-built or a reused/absent category mapping (see $.resolved.category_map_file_path).",
+      "Parameters": {
+        "JobName": "verdict-engine-retriever-creation",
+        "Arguments": {
+          "--tenant.$": "$.tenant",
+          "--segment.$": "$.retriever.segment",
+          "--include_other_tenants.$": "$.retriever.include_other_tenants",
+          "--include_other_segments.$": "$.retriever.include_other_segments",
+          "--category_map_file_path.$": "$.resolved.category_map_file_path",
+          "--output_file_path.$": "$.retriever.output_file_path"
+        }
+      },
+      "ResultPath": "$.results.retriever",
+      "End": true
+    }
+  }
+}

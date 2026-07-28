@@ -1,0 +1,20 @@
+{
+  "_comment": "Sparse/new tenant (e.g. ctc) with little own match history -- rebuild category-mapping, then let the retriever pull in cross-tenant synthetic data via it.",
+  "branch": "verdict",
+  "tenant": "ctc",
+  "run_date": "2026-07-07",
+  "skip_category_mapping": false,
+  "category_mapping": {
+    "competitor_list": "homehardwareca,realcanadiansuperstoreca,decathlonca,costcoca,napacanada,bestbuyca,homedepotca,fortnineca,kimpex,sailca,teamtownsports,sourceforsportsca,golftown,ikeaca,loblaws,royaldistributing,mecca,sportinglifeca,ronaca,nhlshopca,princessauto,bedbathandbeyondca,wayfairca,petsmartca,bassproca,canacca,chewyca,kentca,patrickmorinca,staplesca,amazonca,walmartca",
+    "threshold": "0.5",
+    "output_file_path": "s3://ml-etl-test-dataset/verdict_audit_category_mapping",
+    "nltk_location": "s3://ml-etl-test-dataset/cce_automated_dataset/nltk_data/",
+    "prev_date": "-"
+  },
+  "retriever": {
+    "segment": "gm",
+    "include_other_tenants": "true",
+    "include_other_segments": "true",
+    "output_file_path": "s3://ml-etl-test-dataset/verdict-audit-retrievers"
+  }
+}

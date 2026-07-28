@@ -1,0 +1,14 @@
+{
+  "_comment": "Established tenant (e.g. chewy) with plenty of its own match history -- skip rebuilding category-mapping, and skip synthetic data in the retriever entirely.",
+  "branch": "verdict",
+  "tenant": "chewy",
+  "run_date": "2026-07-07",
+  "skip_category_mapping": true,
+  "retriever": {
+    "segment": "pets",
+    "include_other_tenants": "false",
+    "include_other_segments": "true",
+    "category_map_file_path": "-",
+    "output_file_path": "s3://ml-etl-test-dataset/verdict-audit-retrievers"
+  }
+}
