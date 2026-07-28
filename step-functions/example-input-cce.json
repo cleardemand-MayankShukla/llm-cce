@@ -1,0 +1,9 @@
+{
+  "branch": "cce",
+  "tenant": "chewy",
+  "load_date": "2026-07-07",
+  "cce": {
+    "dynamodb_table": "verdict_audit_env_config",
+    "dynamodb_config_key": "cce_dataset_automation_config"
+  }
+}
