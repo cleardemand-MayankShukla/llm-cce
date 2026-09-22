@@ -2,7 +2,7 @@
 Lambda 2: Run the parameterized INSERT INTO query for adhoc queue population.
 
 Design:
-  - Base product data: from ML Input (latest partition)
+  - Base product data: COALESCE(ML Input, Catalog) — ML Input first, Catalog as fallback
   - Comp product data: COALESCE(ML Input, PDP) — ML Input first, PDP as fallback
   - Mandatory fields are configurable; rows missing any mandatory field are excluded
 
@@ -20,6 +20,8 @@ Input event:
     "product_table": "checkpoint_precision_model_type_ml_input",
     "pdp_database": "pdp_newdev",                     (optional, default: "pdp_newdev")
     "pdp_table": "product_warehouse",                  (optional, default: "product_warehouse")
+    "catalog_database": "bungee_customercatalog",      (optional, default: "bungee_customercatalog")
+    "catalog_table": "athena_auroradb_catalog",        (optional, default: "athena_auroradb_catalog")
 
     "base_store_name_display": "Feederssup",
     "base_source_store_filter": "feederssup_feederssup",
@@ -54,14 +56,28 @@ SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 POLL_INTERVAL_SEC = 2
 MAX_POLL_ATTEMPTS = 150  # ~5 min max wait
 
+
+class LoadDateLookupError(Exception):
+    """The match_library load_date lookup query did not SUCCEED (timeout/failed/
+    cancelled). Distinct from a query that succeeds but returns zero rows."""
+
+    def __init__(self, query_execution_id, status, reason):
+        self.query_execution_id = query_execution_id
+        self.status = status
+        self.reason = reason
+        super().__init__(
+            f"load_date lookup query {status} "
+            f"(query_execution_id={query_execution_id}): {reason}"
+        )
+
 DEFAULT_MANDATORY_FIELDS = ["base_title", "comp_title"]
 
 MANDATORY_FIELD_SQL = {
-    "base_title": "i_base.product_title",
-    "base_url": "i_base.product_url",
-    "base_img": "i_base.image_url",
-    "base_description": "i_base.product_description",
-    "base_brand": "i_base.brand",
+    "base_title": "COALESCE(NULLIF(i_base.product_title,''), cat.product_title)",
+    "base_url": "COALESCE(NULLIF(i_base.product_url,''), cat.product_url)",
+    "base_img": "COALESCE(NULLIF(i_base.image_url,''), cat.image_url)",
+    "base_description": "COALESCE(NULLIF(i_base.product_description,''), cat.product_description)",
+    "base_brand": "COALESCE(NULLIF(i_base.brand,''), cat.brand)",
     "comp_title": "COALESCE(NULLIF(i_comp.product_title,''), pdp.product_title)",
     "comp_url": "COALESCE(NULLIF(i_comp.product_url,''), pdp.product_url)",
     "comp_img": "COALESCE(NULLIF(i_comp.image_url,''), pdp.image_url)",
@@ -91,6 +107,10 @@ def lambda_handler(event, context):
     pdp_table = event.get("pdp_table", "product_warehouse")
     pdp_full = f"{pdp_database}.{pdp_table}"
 
+    catalog_database = event.get("catalog_database", "bungee_customercatalog")
+    catalog_table = event.get("catalog_table", "athena_auroradb_catalog")
+    catalog_full = f"{catalog_database}.{catalog_table}"
+
     base_store_display = event["base_store_name_display"]
     base_source_store_filter = event["base_source_store_filter"]
 
@@ -111,9 +131,22 @@ def lambda_handler(event, context):
     segment = event["segment"]
     queue_name = event["queue_name"]
 
-    match_lib_load_date = _get_latest_match_lib_load_date(
-        match_library_full, company_code, output_location
-    )
+    try:
+        match_lib_load_date = _get_latest_match_lib_load_date(
+            match_library_full, company_code, output_location
+        )
+    except LoadDateLookupError as exc:
+        return {
+            "statusCode": 400,
+            "body": {
+                "message": (
+                    f"load_date lookup in {match_library_full} for "
+                    f"company_code='{company_code}' did not complete: "
+                    f"{exc.status} (query_execution_id={exc.query_execution_id}). "
+                    f"{exc.reason}".strip()
+                )
+            },
+        }
     if not match_lib_load_date:
         return {
             "statusCode": 400,
@@ -189,23 +222,23 @@ SELECT
     CAST(CONCAT(filtered.base_sku, '_', filtered.base_source_store, '<>', filtered.comp_sku, '_', filtered.comp_source_store) AS VARCHAR) AS pair_id,
     CAST('True' AS VARCHAR) AS active,
 
-    CAST(i_base.size_alt AS VARCHAR) AS base_alt_size,
-    CAST(i_base.uom_alt AS VARCHAR) AS base_alt_uom,
-    CAST(i_base.brand AS VARCHAR) AS base_brand,
-    CAST(i_base.category AS VARCHAR) AS base_category,
+    CAST(COALESCE(NULLIF(CAST(i_base.size_alt AS VARCHAR),''), CAST(cat.size_alt AS VARCHAR)) AS VARCHAR) AS base_alt_size,
+    CAST(COALESCE(NULLIF(i_base.uom_alt,''), cat.uom_alt) AS VARCHAR) AS base_alt_uom,
+    CAST(COALESCE(NULLIF(i_base.brand,''), cat.brand) AS VARCHAR) AS base_brand,
+    CAST(COALESCE(NULLIF(i_base.category,''), cat.category) AS VARCHAR) AS base_category,
     CAST(
         '{{base_strength_concentration=null, base_strength_concentration_uom=null,base_pharmacy_package_quantity=null, base_pharmacy_package_quantity_uom=null,base_total_quantity=null, base_total_quantity_uom=null,base_total_quantity_uom_normalized=null, base_product_total_size=null,base_product_total_uom=null}}' AS VARCHAR
     ) AS base_custom_attributes,
 
-    CAST(i_base.product_description AS VARCHAR) AS base_description,
-    CAST(i_base.dimension AS VARCHAR) AS base_dimensions,
-    CAST(i_base.manufacturer_part_number AS VARCHAR) AS base_mfr_part_number,
-    CAST(i_base.image_url AS VARCHAR) AS base_img,
-    CAST(i_base.parent_sku AS VARCHAR) AS base_parent_sku,
+    CAST(COALESCE(NULLIF(i_base.product_description,''), cat.product_description) AS VARCHAR) AS base_description,
+    CAST(COALESCE(NULLIF(i_base.dimension,''), cat.dimension) AS VARCHAR) AS base_dimensions,
+    CAST(COALESCE(NULLIF(i_base.manufacturer_part_number,''), cat.manufacturer_part_number) AS VARCHAR) AS base_mfr_part_number,
+    CAST(COALESCE(NULLIF(i_base.image_url,''), cat.image_url) AS VARCHAR) AS base_img,
+    CAST(COALESCE(NULLIF(i_base.parent_sku,''), cat.parent_sku) AS VARCHAR) AS base_parent_sku,
 
-    CAST(i_base.effective_price AS VARCHAR) AS base_price,
-    CAST(i_base.shipping_weight AS VARCHAR) AS base_shipping_weight,
-    CAST(i_base.size AS VARCHAR) AS base_size,
+    CAST(COALESCE(NULLIF(CAST(i_base.effective_price AS VARCHAR),''), CAST(cat.list_price AS VARCHAR), '0.0') AS VARCHAR) AS base_price,
+    CAST(COALESCE(NULLIF(i_base.shipping_weight,''), cat.shipping_weight) AS VARCHAR) AS base_shipping_weight,
+    CAST(COALESCE(NULLIF(CAST(i_base.size AS VARCHAR),''), CAST(cat.size AS VARCHAR)) AS VARCHAR) AS base_size,
     CAST(filtered.base_sku AS VARCHAR) AS base_sku,
 
     CAST(
@@ -221,12 +254,12 @@ SELECT
 
     CAST('{base_store_display}' AS VARCHAR) AS base_store_name_display,
 
-    CAST(i_base.subcategory AS VARCHAR) AS base_subcategory,
-    CAST(i_base.sub_subcategory AS VARCHAR) AS base_sub_subcategory,
-    CAST(i_base.product_title AS VARCHAR) AS base_title,
-    CAST(i_base.uom AS VARCHAR) AS base_uom,
-    CAST(i_base.upc AS VARCHAR) AS base_upc,
-    CAST(i_base.product_url AS VARCHAR) AS base_url,
+    CAST(COALESCE(NULLIF(i_base.subcategory,''), cat.subcategory) AS VARCHAR) AS base_subcategory,
+    CAST(COALESCE(NULLIF(i_base.sub_subcategory,''), cat.sub_subcategory) AS VARCHAR) AS base_sub_subcategory,
+    CAST(COALESCE(NULLIF(i_base.product_title,''), cat.product_title) AS VARCHAR) AS base_title,
+    CAST(COALESCE(NULLIF(i_base.uom,''), cat.uom) AS VARCHAR) AS base_uom,
+    CAST(COALESCE(NULLIF(i_base.upc,''), split_part(cat.upc, ',', 1)) AS VARCHAR) AS base_upc,
+    CAST(COALESCE(NULLIF(i_base.product_url,''), cat.product_url) AS VARCHAR) AS base_url,
 
     CAST('{bungee_review_state}' AS VARCHAR) AS bungee_review_state,
     CAST('{btfastlane_company_code}' AS VARCHAR) AS company_code,
@@ -323,7 +356,7 @@ FROM (
       AND b.base_sku IS NULL
 ) filtered
 
--- Base: ML Input (latest partition)
+-- Base: ML Input (latest partition, base store only)
 LEFT JOIN (
     SELECT *, ROW_NUMBER() OVER (
         PARTITION BY sku, source_store ORDER BY sku
@@ -338,6 +371,17 @@ LEFT JOIN (
   ON LOWER(filtered.base_sku) = LOWER(i_base.sku)
  AND LOWER(filtered.base_source_store) = LOWER(i_base.source_store)
  AND i_base.rn_base = 1
+
+-- Base fallback: customer catalog (latest capture_date for this tenant)
+LEFT JOIN (
+    SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY sku ORDER BY capture_date DESC
+    ) AS rn_cat
+    FROM {catalog_full}
+    WHERE source = '{company_code}' AND is_active = 'True'
+) cat
+  ON LOWER(filtered.base_sku) = LOWER(CAST(cat.sku AS VARCHAR))
+ AND cat.rn_cat = 1
 
 -- Comp: ML Input (latest partition, only stores present in temp input)
 LEFT JOIN (
@@ -367,9 +411,8 @@ LEFT JOIN (
  AND LOWER(replace(filtered.comp_source_store, '_', '<>')) = LOWER(pdp.source_store)
  AND pdp.rn_pdp = 1
 ) enriched
-{mandatory_where}
 """
-
+# {mandatory_where}
     print(sql)
     result = _execute_query(sql, output_database, output_location)
 
@@ -567,16 +610,29 @@ def _build_mandatory_where(mandatory_fields):
 
 
 def _get_latest_match_lib_load_date(match_library_full, company_code, output_location):
+    # load_date is a PARTITION key on match_library_snapshot. Resolving it via the
+    # "$partitions" metadata table reads the Glue catalog only (~KB scanned, seconds)
+    # instead of full-scanning the 290M-row / 183GB data table with a non-partition
+    # WHERE company_code=... filter (which timed out against the 300s poll cap).
+    # The snapshot is written for all companies on the same load_date, so the global
+    # latest partition is the correct date for this tenant. company_code scoping is
+    # preserved downstream in the INSERT (WHERE load_date=... AND company_code=...).
+    database, table = match_library_full.split(".")
     sql = f"""
-SELECT load_date
-FROM {match_library_full}
-WHERE company_code = '{company_code}'
-ORDER BY load_date DESC
-LIMIT 1
+SELECT max(load_date) AS load_date
+FROM "{database}"."{table}$partitions"
 """
     result = _execute_query(sql, match_library_full.split(".")[0], output_location)
     if result["status"] != "SUCCEEDED":
-        return None
+        # Do NOT collapse a TIMEOUT/FAILED/CANCELLED Athena query into "no data".
+        # Raise with the real query state so the caller reports the actual cause
+        # (e.g. the load_date lookup exceeded the 300s poll cap) instead of the
+        # misleading "No load_date found".
+        raise LoadDateLookupError(
+            query_execution_id=result.get("query_execution_id", ""),
+            status=result["status"],
+            reason=result.get("reason", ""),
+        )
 
     response = athena_client.get_query_results(
         QueryExecutionId=result["query_execution_id"]
